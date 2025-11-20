@@ -1,0 +1,129 @@
+services:
+  ollama:  # Shared GPU Ollama for AI in repos
+    image: ollama/ollama
+    container_name: ollama-gpu
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    ports:
+      - "11434:11434"  # Expose for host access if needed
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./workspace:/workspace  # Share models/scripts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: serve
+
+  # MAIN CONTAINER: AI tools + node-nexus debugger
+  ai-workspace:
+    image: luckyduckcode/optimus-rhyme:ai-workspace
+    container_name: ai-workspace
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTHONPATH=/app/node-nexus
+    volumes:
+      - ./workspace:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # For node-nexus/buffer
+    ports:
+      - "8888:8888"    # Jupyter
+      - "9000:8080"    # VS Code
+      - "6006:6006"    # TensorBoard
+    shm_size: 16g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      sh -c "
+      cd /app/node-nexus/dnd_cli && python cli.py analyze-ecosystem || true &
+      jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root &
+      code-server --bind-addr 0.0.0.0:8080 --auth none /workspace &
+      tensorboard --logdir /workspace/logs --host 0.0.0.0 --port=6006 &
+      tail -f /dev/null
+      "
+    stdin_open: true
+    tty: true
+    depends_on:
+      - ollama
+
+  # NESTED 1: ai-automation-api-bot (Node.js/Electron API for code gen)
+  autovibe:
+    image: luckyduckcode/optimus-rhyme:autovibe
+    container_name: autovibe-ide
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./workspace/automations:/workspace/automations
+    ports:
+      - "3000:3000"  # API for buffer/Telegram
+    shm_size: 8g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    env_file: .env.autovibe
+    depends_on:
+      - ollama
+
+  # NESTED 2: lightning-buffer (FastAPI orchestration)
+  lightning-buffer:
+    image: luckyduckcode/optimus-rhyme:buffer
+    container_name: lightning-buffer
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./workspace/automations:/workspace/automations
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "8000:8000"  # Buffer API
+    shm_size: 4g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    env_file: .env.buffer
+    depends_on:
+      - autovibe
+      - ollama
+
+  # NESTED 3: telegram-ollama-chatbot (Python Telegram bot)
+  telegram-bot:
+    image: luckyduckcode/optimus-rhyme:telegram
+    container_name: telegram-chatbot
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./workspace:/workspace
+    shm_size: 4g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    env_file: .env.telegram
+    depends_on:
+      - ollama
+      - lightning-buffer  # Routes through buffer for orchestration
+
+volumes:
+  ollama_data:

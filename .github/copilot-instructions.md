@@ -1,10 +1,10 @@
 - [x] Verify that the copilot-instructions.md file in the .github directory is created.
 
-- [ ] Clarify Project Requirements
+- [x] Clarify Project Requirements
 
-- [ ] Scaffold the Project
+- [x] Scaffold the Project
 
-- [ ] Customize the Project
+- [x] Customize the Project
 
 - [ ] Install Required Extensions
 

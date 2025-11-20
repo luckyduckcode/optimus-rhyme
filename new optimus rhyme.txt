@@ -1,0 +1,341 @@
+### Updated Docker Compose Setup: 4 GPU-Enabled Containers with One Repo per Nested Container
+
+Based on your request, I've restructured the setup to have **exactly 4 containers**, all GPU-enabled for AI workloads:
+
+- **Main Container (`ai-workspace`)**: Runs JupyterLab, VS Code Server, and TensorBoard as background processes (sharing the GPU environment). It also includes the node-nexus CLI (from the previous setup) for debugging any Node.js components across repos. This acts as the "host" orchestrator.
+- **3 Nested Containers**: Each runs **one specific repo** as a dedicated service:
+  - `autovibe`: Hosts the [ai-automation-api-bot](https://github.com/luckyduckcode/ai-automation-api-bot.git) (Electron-based IDE/API for Python automation generation via Ollama).
+  - `lightning-buffer`: Runs the [lightning-buffer](https://github.com/luckyduckcode/lightning-buffer.git) (FastAPI buffer for orchestrating between Telegram and the IDE).
+  - `telegram-bot`: Deploys the [telegram-ollama-chatbot](https://github.com/luckyduckcode/telegram-ollama-chatbot.git) (AI Telegram bot with Ollama integration).
+
+**Key Design Choices**:
+- **One Repo per Nested Container**: Each nested service clones its repo on build, installs deps, and starts the main app (e.g., Express API for autovibe, Uvicorn for buffer, bot.py for Telegram). They communicate via internal networks (e.g., buffer calls autovibe's API).
+- **GPU Passthrough**: All containers use NVIDIA runtime for AI tasks (Ollama inference, code gen). Ollama runs in a shared mode but is depended on by autovibe and telegram-bot.
+- **Integration Flow**: Telegram-bot → Lightning Buffer (orchestration) → Autovibe (code gen/execution). Node-nexus in main can debug any Node.js parts (e.g., autovibe's Express server).
+- **Shared Volumes**: A common `/workspace` for scripts/models, plus Docker socket for buffer to interact with other containers.
+- **Assumptions**: Host has NVIDIA Docker setup. Repos are cloned fresh on build for reproducibility. Customize `.env` files per repo in your project dir.
+
+### Project Structure
+```
+ai-workspace/
+├── docker-compose.yml
+├── Dockerfile.main          # For main AI workspace
+├── requirements.main.txt    # AI + node-nexus deps
+├── Dockerfile.autovibe      # Custom for ai-automation-api-bot
+├── .env.autovibe            # Env vars for autovibe
+├── Dockerfile.buffer        # Custom for lightning-buffer
+├── .env.buffer              # Env vars for buffer
+├── Dockerfile.telegram      # Custom for telegram-ollama-chatbot
+└── .env.telegram            # Env vars for telegram bot
+    └── workspace/           # Shared: your scripts, notebooks, logs
+```
+
+### 1. Main Dockerfile (ai-workspace)
+```dockerfile
+# Dockerfile.main
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    python3-pip git curl wget vim htop nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -s /usr/bin/python3 /usr/bin/python
+RUN pip3 install --upgrade pip
+
+# Node-Nexus integration
+WORKDIR /app
+RUN git clone https://github.com/luckyduckcode/node-nexus.git
+WORKDIR /app/node-nexus/dnd_cli
+RUN pip install --no-cache-dir -r requirements.txt
+RUN python setup.py install || echo "CLI ready"
+
+# AI stack
+WORKDIR /app
+COPY requirements.main.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Jupyter + extensions
+RUN pip install jupyterlab jupyterlab-vim black isort
+
+# VS Code Server
+RUN curl -fsSL https://code-server.dev/install.sh | sh
+
+EXPOSE 8888 9000 6006
+WORKDIR /workspace
+```
+
+### 2. requirements.main.txt
+```
+torch==2.4.0
+torchvision
+torchaudio
+--extra-index-url https://download.pytorch.org/whl/cu124
+tensorflow==2.17.0
+transformers
+datasets
+accelerate
+wandb
+jupyterlab
+matplotlib
+pandas
+numpy
+```
+
+### 3. Dockerfile for ai-automation-api-bot (autovibe)
+```dockerfile
+# Dockerfile.autovibe
+FROM node:20-bookworm
+
+# Install Python for script execution
+RUN apt-get update && apt-get install -y python3 python3-pip curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone repo
+WORKDIR /app
+RUN git clone https://github.com/luckyduckcode/ai-automation-api-bot.git .
+WORKDIR /app/app
+RUN npm install
+
+# Expose API port (Electron UI runs headlessly; focus on API)
+EXPOSE 3000
+
+# Ollama host will be injected via env
+COPY .env.autovibe .env
+CMD ["npm", "start"]
+```
+
+**.env.autovibe** (create this; customize):
+```
+OLLAMA_HOST=http://ollama:11434
+AUTOMATIONS_DIR=/workspace/automations
+```
+
+### 4. Dockerfile for lightning-buffer
+```dockerfile
+# Dockerfile.buffer
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone repo
+WORKDIR /app
+RUN git clone https://github.com/luckyduckcode/lightning-buffer.git .
+RUN pip install --no-cache-dir -r requirements.txt
+
+EXPOSE 8000
+COPY .env.buffer .env
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+**.env.buffer** (create this; customize):
+```
+AUTOMATION_API_URL=http://autovibe:3000
+AUTOMATION_API_KEY=your-api-key
+AUTOMATIONS_HOST_DIR=/workspace/automations
+BUFFER_PORT=8000
+BUFFER_API_KEY=your-buffer-key
+```
+
+### 5. Dockerfile for telegram-ollama-chatbot
+```dockerfile
+# Dockerfile.telegram
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone repo
+WORKDIR /app
+RUN git clone https://github.com/luckyduckcode/telegram-ollama-chatbot.git .
+RUN pip install --no-cache-dir -r requirements.txt
+
+EXPOSE 11434  # For internal Ollama calls; bot uses polling
+COPY .env.telegram .env
+CMD ["python", "automation/bot.py"]
+```
+
+**.env.telegram** (create this; customize):
+```
+TELEGRAM_BOT_TOKEN=your-bot-token
+OLLAMA_API_URL=http://ollama:11434/api/generate
+OLLAMA_CHAT_MODEL=qwen2.5:7b
+OLLAMA_AUTOMATION_MODEL=deepseek-coder:6.7b
+NGROK_WEBHOOK_HOST=  # Leave blank for polling
+```
+
+### 6. docker-compose.yml (4 Containers + Ollama Helper)
+```yaml
+version: "3.9"
+
+services:
+  ollama:  # Shared GPU Ollama for AI in repos
+    image: ollama/ollama
+    container_name: ollama-gpu
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    ports:
+      - "11434:11434"  # Expose for host access if needed
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./workspace:/workspace  # Share models/scripts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: serve
+
+  # MAIN CONTAINER: AI tools + node-nexus debugger
+  ai-workspace:
+    build:
+      context: .
+      dockerfile: Dockerfile.main
+    container_name: ai-workspace
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTHONPATH=/app/node-nexus
+    volumes:
+      - ./workspace:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # For node-nexus/buffer
+    ports:
+      - "8888:8888"    # Jupyter
+      - "9000:8080"    # VS Code
+      - "6006:6006"    # TensorBoard
+    shm_size: 16g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      sh -c "
+      cd /app/node-nexus/dnd_cli && python cli.py analyze-ecosystem || true &
+      jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root &
+      code-server --bind-addr 0.0.0.0:8080 --auth none /workspace &
+      tensorboard --logdir /workspace/logs --host 0.0.0.0 --port=6006 &
+      tail -f /dev/null
+      "
+    stdin_open: true
+    tty: true
+    depends_on:
+      - ollama
+
+  # NESTED 1: ai-automation-api-bot (Node.js/Electron API for code gen)
+  autovibe:
+    build:
+      context: .
+      dockerfile: Dockerfile.autovibe
+    container_name: autovibe-ide
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./workspace/automations:/workspace/automations
+    ports:
+      - "3000:3000"  # API for buffer/Telegram
+    shm_size: 8g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    env_file: .env.autovibe
+    depends_on:
+      - ollama
+
+  # NESTED 2: lightning-buffer (FastAPI orchestration)
+  lightning-buffer:
+    build:
+      context: .
+      dockerfile: Dockerfile.buffer
+    container_name: lightning-buffer
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./workspace/automations:/workspace/automations
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "8000:8000"  # Buffer API
+    shm_size: 4g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    env_file: .env.buffer
+    depends_on:
+      - autovibe
+      - ollama
+
+  # NESTED 3: telegram-ollama-chatbot (Python Telegram bot)
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.telegram
+    container_name: telegram-chatbot
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./workspace:/workspace
+    shm_size: 4g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    env_file: .env.telegram
+    depends_on:
+      - ollama
+      - lightning-buffer  # Routes through buffer for orchestration
+
+volumes:
+  ollama_data:
+```
+
+### 7. How to Start & Use
+```bash
+# Pull Ollama models first (on host or via exec)
+docker compose run --rm ollama ollama pull qwen2.5:7b  # Or your preferred models
+
+# Build & start all 4 containers + Ollama
+docker compose up --build -d
+
+# Check status
+docker compose ps
+
+# Access:
+# - Main: Jupyter (localhost:8888), VS Code (localhost:9000), TensorBoard (localhost:6006)
+# - Autovibe API: http://localhost:3000/api/health (test code gen)
+# - Buffer: http://localhost:8000/docs (FastAPI docs)
+# - Telegram Bot: Runs via polling; send messages to your bot on Telegram
+
+# Debug with node-nexus (in main)
+docker exec -it ai-workspace bash
+cd /app/node-nexus/dnd_cli
+python cli.py add-node https://github.com/luckyduckcode/ai-automation-api-bot.git --name autovibe
+python cli.py debug autovibe  # Spawns isolated debug container with GPU
+```
+
+### Workflow Example
+1. User messages Telegram bot → Routes to buffer (handles auth/paths).
+2. Buffer calls autovibe API → Generates/executes Python automation via Ollama (GPU-accelerated).
+3. Results saved to shared `/workspace/automations`; view/edit in main's Jupyter/VS Code.
+4. Use node-nexus in main to debug Node.js parts (e.g., autovibe's Express endpoints) by spawning GPU-nested debug containers.
+
+This is fully declarative, GPU-optimized, and repo-isolated. If you need pre-pulled models, GUI for Electron (via X11 forwarding), or tweaks (e.g., webhook for bot), let me know! 🚀
