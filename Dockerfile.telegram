@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y git \
 WORKDIR /app
 RUN git clone https://github.com/luckyduckcode/telegram-ollama-chatbot.git .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir 'python-telegram-bot[webhooks]'
+RUN pip install --no-cache-dir duckduckgo-search beautifulsoup4 lxml
 
+
+COPY web_search.py /app/automation/web_search.py
 COPY .env.telegram .env
 CMD ["python", "automation/bot.py"]

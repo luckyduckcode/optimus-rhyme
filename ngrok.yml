@@ -1,0 +1,7 @@
+authtoken: 35VP6U6HYAlHftHUSZStqcjAAHv_5Vq3s6SytvcAgj5Yrka5v
+version: 2
+tunnels:
+  telegram-webhook:
+    proto: http
+    addr: 8443
+    domain: cityless-proactively-fermina.ngrok-free.dev

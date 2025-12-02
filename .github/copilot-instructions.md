@@ -8,13 +8,13 @@
 
 - [ ] Install Required Extensions
 
-- [ ] Compile the Project
+- [x] Compile the Project
 
 - [ ] Create and Run Task
 
 - [ ] Launch the Project
 
-- [ ] Ensure Documentation is Complete
+- [x] Ensure Documentation is Complete
 
 
 - Work through each checklist item systematically.
