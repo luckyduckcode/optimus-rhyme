@@ -86,3 +86,23 @@ docker build -f Dockerfile.telegram -t luckyduckcode/optimus-rhyme:telegram .
 - Ensure NVIDIA runtime is configured.
 - Check logs: `docker compose logs <service>`
 - For GPU issues, verify `nvidia-docker` installation.
+
+## AVX2 Optimizations
+
+This project now includes AVX2-optimized kernels for 4-bit integer quantization (q4). These kernels provide significant performance improvements for inference on supported CPUs.
+
+- **Source**: `src/kernels/q4_avx2.cpp`
+- **Bindings**: `src/bindings/q4_bindings.cpp`
+- **Tests**: `tests/test_q4_kernel.py`
+
+To build the extensions locally:
+```bash
+pip install .
+```
+
+## CI/CD
+
+A GitHub Actions workflow (`.github/workflows/ci.yml`) is configured to run tests across Ubuntu, Windows, and macOS. It handles:
+- Linting (ruff)
+- Type checking (mypy)
+- Unit tests (pytest) with coverage reporting
